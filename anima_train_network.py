@@ -51,10 +51,14 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
             logger.warning("cache_text_encoder_outputs_to_disk is enabled, so cache_text_encoder_outputs is also enabled")
             args.cache_text_encoder_outputs = True
 
+        train_dataset_group.enable_anima_markdown_section_dropout()
+        if val_dataset_group is not None:
+            val_dataset_group.enable_anima_markdown_section_dropout()
+
         if args.cache_text_encoder_outputs:
             assert train_dataset_group.is_text_encoder_output_cacheable(
                 cache_supports_dropout=True
-            ), "when caching Text Encoder output, shuffle_caption, token_warmup_step or caption_tag_dropout_rate cannot be used"
+            ), "when caching Text Encoder output, markdown_section_dropout, shuffle_caption, token_warmup_step or caption_tag_dropout_rate cannot be used"
 
         assert (
             args.network_train_unet_only or not args.cache_text_encoder_outputs

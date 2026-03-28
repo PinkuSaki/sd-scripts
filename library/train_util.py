@@ -84,6 +84,9 @@ logger = logging.getLogger(__name__)
 # from library.hypernetwork import replace_attentions_for_hypernetwork
 from library.original_unet import UNet2DConditionModel
 
+ANIMA_MARKDOWN_SECTION_DROPOUT_KEY = "markdown_section_dropout"
+ANIMA_MARKDOWN_H2_SECTION_RE = re.compile(r"(?m)^##\s+(.+?)\s*$")
+
 HIGH_VRAM = False
 
 # checkpointファイル名
@@ -738,6 +741,7 @@ class BaseDataset(torch.utils.data.Dataset):
         self.tokenize_strategy = None
         self.text_encoder_output_caching_strategy = None
         self.latents_caching_strategy = None
+        self.anima_markdown_section_dropout_enabled = False
 
     def set_current_strategies(self):
         self.tokenize_strategy = TokenizeStrategy.get_strategy()
@@ -818,7 +822,93 @@ class BaseDataset(torch.utils.data.Dataset):
     def add_replacement(self, str_from, str_to):
         self.replacements[str_from] = str_to
 
+    @staticmethod
+    def _normalize_anima_markdown_section_title(title: str) -> str:
+        return re.sub(r"\s+", " ", title.strip()).casefold()
+
+    @staticmethod
+    def _get_subset_identifier(subset: Any) -> str:
+        for attr_name in ("metadata_file", "image_dir"):
+            value = getattr(subset, attr_name, None)
+            if value:
+                return f"{attr_name}={value}"
+        return subset.__class__.__name__
+
+    def enable_anima_markdown_section_dropout(self) -> bool:
+        has_any_rules = False
+
+        for subset in self.subsets:
+            raw_custom_attributes = getattr(subset, "custom_attributes", None) or {}
+            raw_rules = raw_custom_attributes.get(ANIMA_MARKDOWN_SECTION_DROPOUT_KEY)
+            normalized_rules = {}
+
+            if raw_rules is not None:
+                if not isinstance(raw_rules, dict):
+                    raise ValueError(
+                        f"custom_attributes.{ANIMA_MARKDOWN_SECTION_DROPOUT_KEY} must be a mapping: {self._get_subset_identifier(subset)}"
+                    )
+
+                for title, rate in raw_rules.items():
+                    if not isinstance(title, str) or not title.strip():
+                        raise ValueError(
+                            f"custom_attributes.{ANIMA_MARKDOWN_SECTION_DROPOUT_KEY} keys must be non-empty strings: {self._get_subset_identifier(subset)}"
+                        )
+                    if isinstance(rate, bool) or not isinstance(rate, (int, float)):
+                        raise ValueError(
+                            f"custom_attributes.{ANIMA_MARKDOWN_SECTION_DROPOUT_KEY}.{title} must be a number between 0.0 and 1.0: {self._get_subset_identifier(subset)}"
+                        )
+
+                    rate = float(rate)
+                    if rate < 0.0 or rate > 1.0:
+                        raise ValueError(
+                            f"custom_attributes.{ANIMA_MARKDOWN_SECTION_DROPOUT_KEY}.{title} must be between 0.0 and 1.0: {self._get_subset_identifier(subset)}"
+                        )
+
+                    if rate > 0.0:
+                        normalized_rules[self._normalize_anima_markdown_section_title(title)] = rate
+
+            setattr(subset, "anima_markdown_section_dropout", normalized_rules)
+            has_any_rules = has_any_rules or bool(normalized_rules)
+
+        self.anima_markdown_section_dropout_enabled = has_any_rules
+        return has_any_rules
+
+    def _get_anima_markdown_section_dropout(self, subset: Any) -> Dict[str, float]:
+        if not self.anima_markdown_section_dropout_enabled:
+            return {}
+        return getattr(subset, "anima_markdown_section_dropout", {})
+
+    def _apply_anima_markdown_section_dropout(self, caption: str, rules: Dict[str, float]) -> str:
+        if not rules or "## " not in caption:
+            return caption
+
+        matches = list(ANIMA_MARKDOWN_H2_SECTION_RE.finditer(caption))
+        if not matches:
+            return caption
+
+        kept_parts = []
+        if matches[0].start() > 0:
+            kept_parts.append(caption[: matches[0].start()])
+
+        for i, match in enumerate(matches):
+            section_start = match.start()
+            section_end = matches[i + 1].start() if i + 1 < len(matches) else len(caption)
+            title = self._normalize_anima_markdown_section_title(match.group(1))
+            dropout_rate = rules.get(title, 0.0)
+
+            if dropout_rate > 0.0 and random.random() < dropout_rate:
+                continue
+
+            kept_parts.append(caption[section_start:section_end])
+
+        caption = "".join(kept_parts).strip()
+        return re.sub(r"\n{3,}", "\n\n", caption)
+
     def process_caption(self, subset: BaseSubset, caption):
+        markdown_section_dropout = self._get_anima_markdown_section_dropout(subset)
+        if markdown_section_dropout:
+            caption = self._apply_anima_markdown_section_dropout(caption, markdown_section_dropout)
+
         # caption に prefix/suffix を付ける
         if subset.caption_prefix:
             caption = subset.caption_prefix + " " + caption
@@ -839,7 +929,7 @@ class BaseDataset(torch.utils.data.Dataset):
             # process wildcards
             if subset.enable_wildcard:
                 # if caption is multiline, random choice one line
-                if "\n" in caption:
+                if "\n" in caption and not markdown_section_dropout:
                     caption = random.choice(caption.split("\n"))
 
                 # wildcard is like '{aaa|bbb|ccc...}'
@@ -861,8 +951,10 @@ class BaseDataset(torch.utils.data.Dataset):
                 # unescape the curly braces
                 caption = caption.replace(replacer1, "{").replace(replacer2, "}")
             else:
-                # if caption is multiline, use the first line
-                caption = caption.split("\n")[0]
+                # markdown section dropout for Anima keeps the caption multiline.
+                if not markdown_section_dropout:
+                    # if caption is multiline, use the first line
+                    caption = caption.split("\n")[0]
 
             if subset.shuffle_caption or subset.token_warmup_step > 0 or subset.caption_tag_dropout_rate > 0:
                 fixed_tokens = []
@@ -1107,6 +1199,7 @@ class BaseDataset(torch.utils.data.Dataset):
                     or subset.shuffle_caption
                     or subset.token_warmup_step > 0
                     or subset.caption_tag_dropout_rate > 0
+                    or bool(self._get_anima_markdown_section_dropout(subset))
                 )
                 for subset in self.subsets
             ]
@@ -2653,6 +2746,12 @@ class DatasetGroup(torch.utils.data.ConcatDataset):
     def set_caching_mode(self, caching_mode):
         for dataset in self.datasets:
             dataset.set_caching_mode(caching_mode)
+
+    def enable_anima_markdown_section_dropout(self) -> bool:
+        has_any_rules = False
+        for dataset in self.datasets:
+            has_any_rules = dataset.enable_anima_markdown_section_dropout() or has_any_rules
+        return has_any_rules
 
     def verify_bucket_reso_steps(self, min_steps: int):
         for dataset in self.datasets:
