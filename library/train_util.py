@@ -5944,12 +5944,12 @@ def save_and_remove_state_on_epoch_end(args: argparse.Namespace, accelerator, ep
 
     state_dir = os.path.join(args.output_dir, EPOCH_STATE_NAME.format(model_name, epoch_no))
     accelerator.save_state(state_dir)
-    if args.save_state_to_huggingface:
+    if accelerator.is_main_process and args.save_state_to_huggingface:
         logger.info("uploading state to huggingface.")
         huggingface_util.upload(args, state_dir, "/" + EPOCH_STATE_NAME.format(model_name, epoch_no))
 
     last_n_epochs = args.save_last_n_epochs_state if args.save_last_n_epochs_state else args.save_last_n_epochs
-    if last_n_epochs is not None:
+    if accelerator.is_main_process and last_n_epochs is not None:
         remove_epoch_no = epoch_no - args.save_every_n_epochs * last_n_epochs
         state_dir_old = os.path.join(args.output_dir, EPOCH_STATE_NAME.format(model_name, remove_epoch_no))
         if os.path.exists(state_dir_old):
@@ -5966,12 +5966,12 @@ def save_and_remove_state_stepwise(args: argparse.Namespace, accelerator, step_n
 
     state_dir = os.path.join(args.output_dir, STEP_STATE_NAME.format(model_name, step_no))
     accelerator.save_state(state_dir)
-    if args.save_state_to_huggingface:
+    if accelerator.is_main_process and args.save_state_to_huggingface:
         logger.info("uploading state to huggingface.")
         huggingface_util.upload(args, state_dir, "/" + STEP_STATE_NAME.format(model_name, step_no))
 
     last_n_steps = args.save_last_n_steps_state if args.save_last_n_steps_state else args.save_last_n_steps
-    if last_n_steps is not None:
+    if accelerator.is_main_process and last_n_steps is not None:
         # last_n_steps前のstep_noから、save_every_n_stepsの倍数のstep_noを計算して削除する
         remove_step_no = step_no - last_n_steps - 1
         remove_step_no = remove_step_no - (remove_step_no % args.save_every_n_steps)
@@ -5993,7 +5993,7 @@ def save_state_on_train_end(args: argparse.Namespace, accelerator):
     state_dir = os.path.join(args.output_dir, LAST_STATE_NAME.format(model_name))
     accelerator.save_state(state_dir)
 
-    if args.save_state_to_huggingface:
+    if accelerator.is_main_process and args.save_state_to_huggingface:
         logger.info("uploading last state to huggingface.")
         huggingface_util.upload(args, state_dir, "/" + LAST_STATE_NAME.format(model_name))
 

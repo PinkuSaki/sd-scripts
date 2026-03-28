@@ -1299,6 +1299,12 @@ class Anima(nn.Module):
             t5_input_ids: Optional T5 token IDs (triggers LLM adapter when provided)
             t5_attn_mask: Optional T5 attention mask
         """
+        model_dtype = x_B_C_T_H_W.dtype
+        if crossattn_emb.dtype != model_dtype:
+            crossattn_emb = crossattn_emb.to(dtype=model_dtype)
+        if padding_mask is not None and padding_mask.dtype != model_dtype:
+            padding_mask = padding_mask.to(dtype=model_dtype)
+
         # Run LLM adapter inside forward for correct DDP gradient synchronization
         if t5_input_ids is not None and self.use_llm_adapter and hasattr(self, "llm_adapter"):
             crossattn_emb = self.llm_adapter(

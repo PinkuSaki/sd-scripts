@@ -9,7 +9,7 @@ from typing import Optional
 
 import numpy as np
 import torch
-from accelerate import Accelerator
+from accelerate import Accelerator, PartialState
 from tqdm import tqdm
 from PIL import Image
 
@@ -426,6 +426,7 @@ def sample_images(
     prompts = train_util.load_prompts(args.sample_prompts)
     save_dir = os.path.join(args.output_dir, "sample")
     os.makedirs(save_dir, exist_ok=True)
+    distributed_state = PartialState()
 
     # Save RNG state
     rng_state = torch.get_rng_state()
@@ -435,24 +436,49 @@ def sample_images(
     except Exception:
         pass
 
-    with torch.no_grad(), accelerator.autocast():
-        for prompt_dict in prompts:
-            dit.prepare_block_swap_before_forward()
-            _sample_image_inference(
-                accelerator,
-                args,
-                dit,
-                text_encoder,
-                vae,
-                tokenize_strategy,
-                text_encoding_strategy,
-                save_dir,
-                prompt_dict,
-                epoch,
-                steps,
-                sample_prompts_te_outputs,
-                prompt_replacement,
-            )
+    if distributed_state.num_processes <= 1:
+        with torch.no_grad(), accelerator.autocast():
+            for prompt_dict in prompts:
+                dit.prepare_block_swap_before_forward()
+                _sample_image_inference(
+                    accelerator,
+                    args,
+                    dit,
+                    text_encoder,
+                    vae,
+                    tokenize_strategy,
+                    text_encoding_strategy,
+                    save_dir,
+                    prompt_dict,
+                    epoch,
+                    steps,
+                    sample_prompts_te_outputs,
+                    prompt_replacement,
+                )
+    else:
+        per_process_prompts = []
+        for i in range(distributed_state.num_processes):
+            per_process_prompts.append(prompts[i :: distributed_state.num_processes])
+
+        with torch.no_grad(), accelerator.autocast():
+            with distributed_state.split_between_processes(per_process_prompts) as prompt_dict_lists:
+                for prompt_dict in prompt_dict_lists[0]:
+                    dit.prepare_block_swap_before_forward()
+                    _sample_image_inference(
+                        accelerator,
+                        args,
+                        dit,
+                        text_encoder,
+                        vae,
+                        tokenize_strategy,
+                        text_encoding_strategy,
+                        save_dir,
+                        prompt_dict,
+                        epoch,
+                        steps,
+                        sample_prompts_te_outputs,
+                        prompt_replacement,
+                    )
 
     # Restore RNG state
     torch.set_rng_state(rng_state)

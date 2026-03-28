@@ -65,6 +65,45 @@ def prepare_deepspeed_args(args: argparse.Namespace):
     if not args.deepspeed:
         return
 
+    optimizer_type = getattr(args, "optimizer_type", None)
+    if getattr(args, "use_8bit_adam", False):
+        optimizer_type = "AdamW8bit"
+    if optimizer_type is None or optimizer_type == "":
+        optimizer_type = "AdamW"
+
+    # DeepSpeed bf16 path wraps the provided optimizer with BF16_Optimizer.
+    # bitsandbytes 8-bit optimizers are treated as "untested" by Accelerate/DeepSpeed
+    # and can fail with opaque assertions such as bf16_optimizer all_groups_norm == 0.
+    if args.mixed_precision == "bf16" and optimizer_type.lower().endswith("8bit"):
+        fallback_map = {
+            "adamw8bit": "AdamW",
+            "pagedadamw8bit": "AdamW",
+            "lion8bit": "Lion",
+            "pagedlion8bit": "Lion",
+            "sgdnesterov8bit": "SGDNesterov",
+        }
+        fallback_type = fallback_map.get(optimizer_type.lower())
+        if fallback_type is None:
+            raise ValueError(
+                f"DeepSpeed with mixed_precision=bf16 does not support optimizer_type={optimizer_type}. "
+                "Please switch to a non-8bit optimizer such as AdamW, disable --deepspeed, or use mixed_precision=no. "
+                f"/ 本仓库中 DeepSpeed + mixed_precision=bf16 不支持 optimizer_type={optimizer_type}。"
+                "请改用非 8bit optimizer（如 AdamW）、移除 --deepspeed，或改为 mixed_precision=no。"
+            )
+
+        logger.warning(
+            "DeepSpeed with mixed_precision=bf16 is not compatible with %s in this repository. "
+            "Falling back to %s so DeepSpeed can use a supported optimizer path. "
+            "/ 本仓库中 DeepSpeed + mixed_precision=bf16 与 %s 不兼容，已自动回退到 %s 以使用兼容的 DeepSpeed optimizer 路径。",
+            optimizer_type,
+            fallback_type,
+            optimizer_type,
+            fallback_type,
+        )
+        args.optimizer_type = fallback_type
+        if getattr(args, "use_8bit_adam", False):
+            args.use_8bit_adam = False
+
     # To avoid RuntimeError: DataLoader worker exited unexpectedly with exit code 1.
     args.max_data_loader_n_workers = 1
 

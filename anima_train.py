@@ -339,6 +339,13 @@ def train(args):
         accelerator.print("enable full bf16 training.")
     else:
         dit_weight_dtype = torch.float32  # If neither full_fp16 nor full_bf16, the model weights should be in float32
+
+    # DeepSpeed mixed precision converts the model to fp16/bf16 internally.
+    # Keep Anima inputs aligned with the engine/model dtype, otherwise modules such as
+    # the LLM adapter can receive fp32 activations while weights are bf16.
+    if args.deepspeed and args.mixed_precision != "no":
+        dit_weight_dtype = weight_dtype
+
     dit.to(dit_weight_dtype)  # convert dit to target weight dtype
 
     # move text encoder to GPU if not cached
@@ -356,11 +363,13 @@ def train(args):
     # clean_memory_on_device(accelerator.device)
 
     if args.deepspeed:
-        ds_model = deepspeed_utils.prepare_deepspeed_model(args, mmdit=dit)
-        ds_model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-            ds_model, optimizer, train_dataloader, lr_scheduler
+        # Anima full finetune has a single trainable model, so prepare the model directly.
+        # This keeps the execution path aligned with standard DeepSpeed engine usage and
+        # avoids relying on the wrapper-only path that is mainly for multi-model scripts.
+        dit, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            dit, optimizer, train_dataloader, lr_scheduler
         )
-        training_models = [ds_model]
+        training_models = [dit]
     else:
         if train_dit:
             dit = accelerator.prepare(dit, device_placement=[not is_swapping_blocks])
@@ -632,6 +641,8 @@ def train(args):
                             global_step,
                             accelerator.unwrap_model(dit) if train_dit else None,
                         )
+                    elif args.deepspeed and args.save_state:
+                        train_util.save_and_remove_state_stepwise(args, accelerator, global_step)
                 optimizer_train_fn()
 
             current_loss = loss.detach().item()
@@ -661,17 +672,21 @@ def train(args):
 
         optimizer_eval_fn()
         if args.save_every_n_epochs is not None:
-            if accelerator.is_main_process:
-                anima_train_utils.save_anima_model_on_epoch_end_or_stepwise(
-                    args,
-                    True,
-                    accelerator,
-                    save_dtype,
-                    epoch,
-                    num_train_epochs,
-                    global_step,
-                    accelerator.unwrap_model(dit) if train_dit else None,
-                )
+            saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
+            if saving:
+                if accelerator.is_main_process:
+                    anima_train_utils.save_anima_model_on_epoch_end_or_stepwise(
+                        args,
+                        True,
+                        accelerator,
+                        save_dtype,
+                        epoch,
+                        num_train_epochs,
+                        global_step,
+                        accelerator.unwrap_model(dit) if train_dit else None,
+                    )
+                elif args.deepspeed and args.save_state:
+                    train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
 
         anima_train_utils.sample_images(
             accelerator,
@@ -690,13 +705,10 @@ def train(args):
     is_main_process = accelerator.is_main_process
     dit = accelerator.unwrap_model(dit)
 
-    accelerator.end_training()
     optimizer_eval_fn()
 
     if args.save_state or args.save_state_on_train_end:
         train_util.save_state_on_train_end(args, accelerator)
-
-    del accelerator
 
     if is_main_process and train_dit:
         anima_train_utils.save_anima_model_on_train_end(
@@ -707,6 +719,9 @@ def train(args):
             dit,
         )
         logger.info("model saved.")
+
+    accelerator.end_training()
+    del accelerator
 
 
 def setup_parser() -> argparse.ArgumentParser:
