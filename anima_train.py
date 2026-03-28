@@ -143,6 +143,23 @@ def train(args):
 
     train_dataset_group.verify_bucket_reso_steps(16)  # Qwen-Image VAE spatial downscale = 8 * patch size = 2
 
+    # debug_dataset also tokenizes captions, so the strategies must be available
+    # before we early-return from the debug path.
+    logger.info("Loading tokenizers...")
+    qwen3_tokenizer = anima_utils.load_qwen3_tokenizer(args.qwen3)
+    t5_tokenizer = anima_utils.load_t5_tokenizer(args.t5_tokenizer_path)
+
+    tokenize_strategy = strategy_anima.AnimaTokenizeStrategy(
+        qwen3_tokenizer=qwen3_tokenizer,
+        t5_tokenizer=t5_tokenizer,
+        qwen3_max_length=args.qwen3_max_token_length,
+        t5_max_length=args.t5_max_token_length,
+    )
+    strategy_base.TokenizeStrategy.set_strategy(tokenize_strategy)
+
+    text_encoding_strategy = strategy_anima.AnimaTextEncodingStrategy()
+    strategy_base.TextEncodingStrategy.set_strategy(text_encoding_strategy)
+
     if args.debug_dataset:
         if args.cache_text_encoder_outputs:
             strategy_base.TextEncoderOutputsCachingStrategy.set_strategy(
@@ -167,22 +184,8 @@ def train(args):
     # mixed precision dtype
     weight_dtype, save_dtype = train_util.prepare_dtype(args)
 
-    # Load tokenizers and set strategies
-    logger.info("Loading tokenizers...")
-    qwen3_text_encoder, qwen3_tokenizer = anima_utils.load_qwen3_text_encoder(args.qwen3, dtype=weight_dtype, device="cpu")
-    t5_tokenizer = anima_utils.load_t5_tokenizer(args.t5_tokenizer_path)
-
-    # Set tokenize strategy
-    tokenize_strategy = strategy_anima.AnimaTokenizeStrategy(
-        qwen3_tokenizer=qwen3_tokenizer,
-        t5_tokenizer=t5_tokenizer,
-        qwen3_max_length=args.qwen3_max_token_length,
-        t5_max_length=args.t5_max_token_length,
-    )
-    strategy_base.TokenizeStrategy.set_strategy(tokenize_strategy)
-
-    text_encoding_strategy = strategy_anima.AnimaTextEncodingStrategy()
-    strategy_base.TextEncodingStrategy.set_strategy(text_encoding_strategy)
+    # Load text encoder after strategies are already registered for dataset/debug usage.
+    qwen3_text_encoder, _ = anima_utils.load_qwen3_text_encoder(args.qwen3, dtype=weight_dtype, device="cpu")
 
     # Prepare text encoder (always frozen for Anima)
     qwen3_text_encoder.to(weight_dtype)

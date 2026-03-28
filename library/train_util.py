@@ -142,6 +142,16 @@ TEXT_ENCODER_OUTPUTS_CACHE_SUFFIX = "_te_outputs.npz"
 TEXT_ENCODER_OUTPUTS_CACHE_SUFFIX_SD3 = "_sd3_te.npz"
 
 
+def normalize_config_container(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: normalize_config_container(sub_value) for key, sub_value in value.items()}
+    if isinstance(value, list):
+        return [normalize_config_container(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(normalize_config_container(item) for item in value)
+    return value
+
+
 def split_train_val(
     paths: List[str],
     sizes: List[Optional[Tuple[int, int]]],
@@ -462,7 +472,9 @@ class BaseSubset:
         self.token_warmup_min = token_warmup_min  # step=0におけるタグの数
         self.token_warmup_step = token_warmup_step  # N（N<1ならN*max_train_steps）ステップ目でタグの数が最大になる
 
-        self.custom_attributes = custom_attributes if custom_attributes is not None else {}
+        # TOML inline tables can be represented by dict subclasses that are not
+        # picklable across dataloader workers, so normalize them once here.
+        self.custom_attributes = normalize_config_container(custom_attributes) if custom_attributes is not None else {}
 
         self.img_count = 0
 
@@ -2889,8 +2901,9 @@ def debug_dataset(train_dataset, show_input_ids=False):
                     example["flippeds"],
                 )
             ):
+                caption_for_log = json.dumps(cap, ensure_ascii=False)
                 logger.info(
-                    f'{ik}, size: {train_dataset.image_data[ik].image_size}, loss weight: {lw}, caption: "{cap}", original size: {orgsz}, crop top left: {crptl}, target size: {trgsz}, flipped: {flpdz}'
+                    f"{ik}, size: {train_dataset.image_data[ik].image_size}, loss weight: {lw}, caption: {caption_for_log}, original size: {orgsz}, crop top left: {crptl}, target size: {trgsz}, flipped: {flpdz}"
                 )
                 if "network_multipliers" in example:
                     logger.info(f"network multiplier: {example['network_multipliers'][j]}")

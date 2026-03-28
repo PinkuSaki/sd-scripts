@@ -11,3 +11,10 @@ GEMINI.md
 .claude
 .gemini
 MagicMock
+train_hires/
+train_sparxie/
+models/
+*.safetensors
+*.ckpt
+*.pt
+*.pth

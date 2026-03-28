@@ -564,6 +564,8 @@ class NetworkTrainer:
         ds_for_collator = train_dataset_group if args.max_data_loader_n_workers == 0 else None
         collator = train_util.collator_class(current_epoch, current_step, ds_for_collator)
 
+        self.assert_extra_args(args, train_dataset_group, val_dataset_group)  # may change some args
+
         if args.debug_dataset:
             train_dataset_group.set_current_strategies()  # dataset needs to know the strategies explicitly
             train_util.debug_dataset(train_dataset_group)
@@ -586,8 +588,6 @@ class NetworkTrainer:
                 assert (
                     val_dataset_group.is_latent_cacheable()
                 ), "when caching latents, either color_aug or random_crop cannot be used / latentをキャッシュするときはcolor_augとrandom_cropは使えません"
-
-        self.assert_extra_args(args, train_dataset_group, val_dataset_group)  # may change some args
 
         # acceleratorを準備する
         logger.info("preparing accelerator")

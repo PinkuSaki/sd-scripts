@@ -1,3 +1,4 @@
+import pickle
 import sys
 from importlib.machinery import ModuleSpec
 from types import ModuleType
@@ -334,3 +335,22 @@ def test_anima_markdown_section_dropout_disables_text_encoder_output_cache():
     dataset.enable_anima_markdown_section_dropout()
 
     assert dataset.is_text_encoder_output_cacheable(cache_supports_dropout=True) is False
+
+
+def test_subset_custom_attributes_are_normalized_to_picklable_builtin_containers():
+    class InlineTableDict(dict):
+        pass
+
+    subset = make_subset(
+        InlineTableDict(
+            {
+                "markdown_section_dropout": InlineTableDict({"Character 1": 1.0, "Atmosphere": 0.5}),
+            }
+        )
+    )
+
+    assert type(subset.custom_attributes) is dict
+    assert type(subset.custom_attributes["markdown_section_dropout"]) is dict
+    assert subset.custom_attributes["markdown_section_dropout"]["Character 1"] == 1.0
+
+    pickle.dumps(subset.custom_attributes)
