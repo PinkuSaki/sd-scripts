@@ -127,6 +127,15 @@ def train(args):
         train_dataset_group = train_util.load_arbitrary_dataset(args)
         val_dataset_group = None
 
+    train_dataset_group.enable_anima_markdown_section_dropout()
+    if val_dataset_group is not None:
+        val_dataset_group.enable_anima_markdown_section_dropout()
+
+    if args.cache_text_encoder_outputs:
+        assert train_dataset_group.is_text_encoder_output_cacheable(
+            cache_supports_dropout=True
+        ), "when caching text encoder output, markdown_section_dropout, shuffle_caption, token_warmup_step or caption_tag_dropout_rate cannot be used"
+
     current_epoch = Value("i", 0)
     current_step = Value("i", 0)
     ds_for_collator = train_dataset_group if args.max_data_loader_n_workers == 0 else None
@@ -150,11 +159,6 @@ def train(args):
 
     if cache_latents:
         assert train_dataset_group.is_latent_cacheable(), "when caching latents, either color_aug or random_crop cannot be used"
-
-    if args.cache_text_encoder_outputs:
-        assert train_dataset_group.is_text_encoder_output_cacheable(
-            cache_supports_dropout=True
-        ), "when caching text encoder output, shuffle_caption, token_warmup_step or caption_tag_dropout_rate cannot be used"
 
     # prepare accelerator
     logger.info("prepare accelerator")

@@ -508,6 +508,18 @@ Caption dropout uses the `caption_dropout_rate` setting from the dataset configu
 
 Note: Currently, only Anima supports combining `caption_dropout_rate` with text encoder output caching.
 
+#### Markdown Section Dropout
+
+Anima also supports dropping Markdown H2 sections from `metadata.json` captions via `custom_attributes.markdown_section_dropout` in each subset. The value is a mapping from section title to dropout rate:
+
+```toml
+custom_attributes = { markdown_section_dropout = { Atmosphere = 0.5, Artist = 1.0, "Image effects" = 0.8 } }
+```
+
+When a section is dropped, both the `## Title` line and its body are removed until the next `##` heading or the end of the caption. Matching is case-insensitive after trimming whitespace. Each configured section is sampled independently.
+
+Unlike `caption_dropout_rate`, Markdown section dropout is treated as caption augmentation and is **not compatible** with `--cache_text_encoder_outputs`.
+
 <details>
 <summary>日本語</summary>
 
@@ -538,6 +550,18 @@ Note: Currently, only Anima supports combining `caption_dropout_rate` with text 
 **`caption_dropout_rate`の設定を変えた場合、キャッシュを削除し、再生成する必要があります。**
 
 ※`caption_dropout_rate`をテキストエンコーダー出力キャッシュと組み合わせられるのは、今のところAnimaのみです。
+
+#### Markdownセクションのドロップアウト
+
+Animaでは、各subsetの`custom_attributes.markdown_section_dropout`で`metadata.json`のMarkdown H2セクションをドロップできます。値は「セクション名 -> ドロップ率」のマッピングです。
+
+```toml
+custom_attributes = { markdown_section_dropout = { Atmosphere = 0.5, Artist = 1.0, "Image effects" = 0.8 } }
+```
+
+セクションがドロップされると、`## タイトル`行とその本文が、次の`##`見出しまたはキャプション末尾までまとめて削除されます。見出し名は前後の空白を除去したうえで大文字小文字を区別せずに比較され、各セクションは独立にサンプリングされます。
+
+`caption_dropout_rate`とは異なり、Markdownセクションのドロップアウトはcaption augmentationとして扱われるため、`--cache_text_encoder_outputs`とは**互換性がありません**。
 
 </details>
 
