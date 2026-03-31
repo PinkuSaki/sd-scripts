@@ -65,6 +65,13 @@ def prepare_deepspeed_args(args: argparse.Namespace):
     if not args.deepspeed:
         return
 
+    if args.zero_stage == 3 and not args.zero3_save_16bit_model:
+        args.zero3_save_16bit_model = True
+        logger.warning(
+            "DeepSpeed ZeRO-3 detected. Enabling zero3_save_16bit_model by default so full model weights are saved instead of local shards. "
+            "/ 检测到 DeepSpeed ZeRO-3，已默认开启 zero3_save_16bit_model，以保存完整模型权重而不是本地分片。"
+        )
+
     optimizer_type = getattr(args, "optimizer_type", None)
     if getattr(args, "use_8bit_adam", False):
         optimizer_type = "AdamW8bit"

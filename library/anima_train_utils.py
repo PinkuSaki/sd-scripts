@@ -29,6 +29,22 @@ logger = logging.getLogger(__name__)
 # Anima-specific training arguments
 
 
+def _use_zero3_sampling_all_ranks(args: argparse.Namespace, distributed_state: PartialState) -> bool:
+    return (
+        distributed_state.num_processes > 1
+        and getattr(args, "deepspeed", False)
+        and getattr(args, "zero_stage", 0) == 3
+    )
+
+
+def use_all_ranks_for_anima_weight_save(args: argparse.Namespace, accelerator: Accelerator) -> bool:
+    return (
+        accelerator.num_processes > 1
+        and getattr(args, "deepspeed", False)
+        and getattr(args, "zero_stage", 0) == 3
+    )
+
+
 def add_anima_training_arguments(parser: argparse.ArgumentParser):
     """Add Anima-specific training arguments to the parser."""
     parser.add_argument(
@@ -249,22 +265,30 @@ def get_anima_param_groups(
 # Save functions
 def save_anima_model_on_train_end(
     args: argparse.Namespace,
+    accelerator: Accelerator,
     save_dtype: torch.dtype,
     epoch: int,
     global_step: int,
     dit: anima_models.Anima,
 ):
     """Save Anima model at the end of training."""
+    dit_sd = None
+    if use_all_ranks_for_anima_weight_save(args, accelerator):
+        dit_sd = _get_anima_state_dict_for_save(accelerator, args, dit)
 
     def sd_saver(ckpt_file, epoch_no, global_step):
         sai_metadata = train_util.get_sai_model_spec_dataclass(
             None, args, False, False, False, is_stable_diffusion_ckpt=True, anima="preview"
         ).to_metadata_dict()
-        dit_sd = dit.state_dict()
+        state_dict = dit_sd if dit_sd is not None else _get_anima_state_dict_for_save(accelerator, args, dit)
         # Save with 'net.' prefix for ComfyUI compatibility
-        anima_utils.save_anima_model(ckpt_file, dit_sd, sai_metadata, save_dtype)
+        anima_utils.save_anima_model(ckpt_file, state_dict, sai_metadata, save_dtype)
 
-    train_util.save_sd_model_on_train_end_common(args, True, True, epoch, global_step, sd_saver, None)
+    if accelerator.is_main_process:
+        train_util.save_sd_model_on_train_end_common(args, True, True, epoch, global_step, sd_saver, None)
+
+    if use_all_ranks_for_anima_weight_save(args, accelerator):
+        accelerator.wait_for_everyone()
 
 
 def save_anima_model_on_epoch_end_or_stepwise(
@@ -278,29 +302,55 @@ def save_anima_model_on_epoch_end_or_stepwise(
     dit: anima_models.Anima,
 ):
     """Save Anima model at epoch end or specific steps."""
+    use_all_ranks = use_all_ranks_for_anima_weight_save(args, accelerator)
+    dit_sd = None
+    if use_all_ranks:
+        dit_sd = _get_anima_state_dict_for_save(accelerator, args, dit)
 
     def sd_saver(ckpt_file, epoch_no, global_step):
         sai_metadata = train_util.get_sai_model_spec_dataclass(
             None, args, False, False, False, is_stable_diffusion_ckpt=True, anima="preview"
         ).to_metadata_dict()
-        dit_sd = dit.state_dict()
-        anima_utils.save_anima_model(ckpt_file, dit_sd, sai_metadata, save_dtype)
+        state_dict = dit_sd if dit_sd is not None else _get_anima_state_dict_for_save(accelerator, args, dit)
+        anima_utils.save_anima_model(ckpt_file, state_dict, sai_metadata, save_dtype)
 
-    train_util.save_sd_model_on_epoch_end_or_stepwise_common(
-        args,
-        on_epoch_end,
-        accelerator,
-        True,
-        True,
-        epoch,
-        num_train_epochs,
-        global_step,
-        sd_saver,
-        None,
-    )
+    if accelerator.is_main_process:
+        train_util.save_sd_model_on_epoch_end_or_stepwise_common(
+            args,
+            on_epoch_end,
+            accelerator,
+            True,
+            True,
+            epoch,
+            num_train_epochs,
+            global_step,
+            sd_saver,
+            None,
+        )
+    elif use_all_ranks and args.deepspeed and args.save_state:
+        if on_epoch_end:
+            train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
+        else:
+            train_util.save_and_remove_state_stepwise(args, accelerator, global_step)
+
+    if use_all_ranks:
+        accelerator.wait_for_everyone()
 
 
 # Sampling (Euler discrete for rectified flow)
+def _get_anima_state_dict_for_save(accelerator: Accelerator, args: argparse.Namespace, dit: anima_models.Anima):
+    try:
+        return accelerator.get_state_dict(dit)
+    except ValueError as e:
+        if getattr(args, "deepspeed", False) and getattr(args, "zero_stage", 0) == 3:
+            raise ValueError(
+                "Saving Anima weights with DeepSpeed ZeRO-3 requires consolidated 16-bit weights. "
+                "Please enable --zero3_save_16bit_model so Accelerate/DeepSpeed can gather the full state dict "
+                "instead of saving a local shard. / 使用 DeepSpeed ZeRO-3 保存 Anima 权重时，需要开启 --zero3_save_16bit_model。"
+            ) from e
+        raise
+
+
 def do_sample(
     height: int,
     width: int,
@@ -427,6 +477,11 @@ def sample_images(
     save_dir = os.path.join(args.output_dir, "sample")
     os.makedirs(save_dir, exist_ok=True)
     distributed_state = PartialState()
+    use_zero3_sampling_all_ranks = _use_zero3_sampling_all_ranks(args, distributed_state)
+    if use_zero3_sampling_all_ranks:
+        logger.info(
+            "DeepSpeed ZeRO-3 detected during sampling. All ranks will run the same prompts so parameter all-gathers stay aligned; only the main process will decode and save images."
+        )
 
     # Save RNG state
     rng_state = torch.get_rng_state()
@@ -436,7 +491,8 @@ def sample_images(
     except Exception:
         pass
 
-    if distributed_state.num_processes <= 1:
+    if distributed_state.num_processes <= 1 or use_zero3_sampling_all_ranks:
+        should_save = True if distributed_state.num_processes <= 1 else accelerator.is_main_process
         with torch.no_grad(), accelerator.autocast():
             for prompt_dict in prompts:
                 dit.prepare_block_swap_before_forward()
@@ -454,7 +510,10 @@ def sample_images(
                     steps,
                     sample_prompts_te_outputs,
                     prompt_replacement,
+                    should_save=should_save,
                 )
+                if use_zero3_sampling_all_ranks:
+                    accelerator.wait_for_everyone()
     else:
         per_process_prompts = []
         for i in range(distributed_state.num_processes):
@@ -478,6 +537,7 @@ def sample_images(
                         steps,
                         sample_prompts_te_outputs,
                         prompt_replacement,
+                        should_save=True,
                     )
 
     # Restore RNG state
@@ -503,6 +563,7 @@ def _sample_image_inference(
     steps,
     sample_prompts_te_outputs,
     prompt_replacement,
+    should_save=True,
 ):
     """Generate a single sample image."""
     prompt = prompt_dict.get("prompt", "")
@@ -526,9 +587,10 @@ def _sample_image_inference(
     height = max(64, height - height % 16)
     width = max(64, width - width % 16)
 
-    logger.info(
-        f"  prompt: {prompt}, size: {width}x{height}, steps: {sample_steps}, scale: {scale}, flow_shift: {flow_shift}, seed: {seed}"
-    )
+    if should_save:
+        logger.info(
+            f"  prompt: {prompt}, size: {width}x{height}, steps: {sample_steps}, scale: {scale}, flow_shift: {flow_shift}, seed: {seed}"
+        )
 
     # Encode prompt
     def encode_prompt(prpt):
@@ -604,6 +666,11 @@ def _sample_image_inference(
     latents = do_sample(
         height, width, seed, dit, crossattn_emb, sample_steps, dit.dtype, accelerator.device, scale, flow_shift, neg_crossattn_emb
     )
+
+    if not should_save:
+        del latents
+        clean_memory_on_device(accelerator.device)
+        return
 
     # Decode latents
     gc.collect()

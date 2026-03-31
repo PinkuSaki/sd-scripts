@@ -637,7 +637,8 @@ def train(args):
                 # Save at specific steps
                 if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
                     accelerator.wait_for_everyone()
-                    if accelerator.is_main_process:
+                    save_anima_on_all_ranks = train_dit and anima_train_utils.use_all_ranks_for_anima_weight_save(args, accelerator)
+                    if accelerator.is_main_process or save_anima_on_all_ranks:
                         anima_train_utils.save_anima_model_on_epoch_end_or_stepwise(
                             args,
                             False,
@@ -646,10 +647,8 @@ def train(args):
                             epoch,
                             num_train_epochs,
                             global_step,
-                            accelerator.unwrap_model(dit) if train_dit else None,
+                            dit if train_dit else None,
                         )
-                    elif args.deepspeed and args.save_state:
-                        train_util.save_and_remove_state_stepwise(args, accelerator, global_step)
                 optimizer_train_fn()
 
             current_loss = loss.detach().item()
@@ -681,7 +680,8 @@ def train(args):
         if args.save_every_n_epochs is not None:
             saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
             if saving:
-                if accelerator.is_main_process:
+                save_anima_on_all_ranks = train_dit and anima_train_utils.use_all_ranks_for_anima_weight_save(args, accelerator)
+                if accelerator.is_main_process or save_anima_on_all_ranks:
                     anima_train_utils.save_anima_model_on_epoch_end_or_stepwise(
                         args,
                         True,
@@ -690,10 +690,8 @@ def train(args):
                         epoch,
                         num_train_epochs,
                         global_step,
-                        accelerator.unwrap_model(dit) if train_dit else None,
+                        dit if train_dit else None,
                     )
-                elif args.deepspeed and args.save_state:
-                    train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
 
         anima_train_utils.sample_images(
             accelerator,
@@ -710,16 +708,16 @@ def train(args):
 
     # End training
     is_main_process = accelerator.is_main_process
-    dit = accelerator.unwrap_model(dit)
-
     optimizer_eval_fn()
 
     if args.save_state or args.save_state_on_train_end:
         train_util.save_state_on_train_end(args, accelerator)
 
-    if is_main_process and train_dit:
+    save_anima_on_all_ranks = train_dit and anima_train_utils.use_all_ranks_for_anima_weight_save(args, accelerator)
+    if (is_main_process or save_anima_on_all_ranks) and train_dit:
         anima_train_utils.save_anima_model_on_train_end(
             args,
+            accelerator,
             save_dtype,
             epoch,
             global_step,
