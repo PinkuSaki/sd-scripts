@@ -5,22 +5,25 @@ from types import ModuleType, SimpleNamespace
 
 
 def install_deepspeed_utils_import_stubs():
-    if "accelerate" not in sys.modules:
+    accelerate_module = sys.modules.get("accelerate")
+    if accelerate_module is None:
         accelerate_module = ModuleType("accelerate")
         accelerate_module.__spec__ = ModuleSpec("accelerate", loader=None)
-        accelerate_module.DeepSpeedPlugin = type("DeepSpeedPlugin", (), {})
-        accelerate_module.Accelerator = type("Accelerator", (), {})
         sys.modules["accelerate"] = accelerate_module
+    accelerate_module.DeepSpeedPlugin = getattr(accelerate_module, "DeepSpeedPlugin", type("DeepSpeedPlugin", (), {}))
+    accelerate_module.Accelerator = getattr(accelerate_module, "Accelerator", type("Accelerator", (), {}))
 
     utils_module = ModuleType("library.utils")
     utils_module.__spec__ = ModuleSpec("library.utils", loader=None)
     utils_module.setup_logging = lambda *args, **kwargs: None
     sys.modules.setdefault("library.utils", utils_module)
 
-    device_utils_module = ModuleType("library.device_utils")
-    device_utils_module.__spec__ = ModuleSpec("library.device_utils", loader=None)
+    device_utils_module = sys.modules.get("library.device_utils")
+    if device_utils_module is None:
+        device_utils_module = ModuleType("library.device_utils")
+        device_utils_module.__spec__ = ModuleSpec("library.device_utils", loader=None)
+        sys.modules["library.device_utils"] = device_utils_module
     device_utils_module.get_preferred_device = lambda: SimpleNamespace(type="cuda")
-    sys.modules.setdefault("library.device_utils", device_utils_module)
 
 
 install_deepspeed_utils_import_stubs()

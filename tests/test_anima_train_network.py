@@ -1,7 +1,7 @@
 import argparse
 import sys
 from importlib.machinery import ModuleSpec
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -31,6 +31,14 @@ def install_anima_train_network_import_stubs():
     class NetworkTrainer:
         def __init__(self):
             pass
+
+        def all_reduce_network(self, accelerator, network):
+            for param in network.parameters():
+                if param.grad is not None:
+                    param.grad = accelerator.reduce(param.grad, reduction="mean")
+
+        def save_network_weights(self, args, accelerator, training_model, network, ckpt_file, save_dtype, metadata):
+            network.save_weights(ckpt_file, save_dtype, metadata)
 
     train_network_module.NetworkTrainer = NetworkTrainer
     sys.modules.setdefault("train_network", train_network_module)
@@ -86,6 +94,7 @@ def mock_args():
         cpu_offload_checkpointing=False,
         unsloth_offload_checkpointing=False,
         gradient_checkpointing=False,
+        deepspeed=False,
     )
 
 
@@ -122,3 +131,75 @@ def test_assert_extra_args_allows_text_encoder_cache_without_markdown_section_dr
     val_dataset_group.enable_anima_markdown_section_dropout.assert_called_once()
     train_dataset_group.verify_bucket_reso_steps.assert_called()
     val_dataset_group.verify_bucket_reso_steps.assert_called()
+
+
+def test_assert_extra_args_rejects_deepspeed_with_block_swap(trainer, mock_args):
+    mock_args.deepspeed = True
+    mock_args.blocks_to_swap = 1
+
+    train_dataset_group = MagicMock()
+    train_dataset_group.enable_anima_markdown_section_dropout.return_value = False
+    train_dataset_group.is_text_encoder_output_cacheable.return_value = True
+    train_dataset_group.verify_bucket_reso_steps = MagicMock()
+
+    with pytest.raises(AssertionError, match="blocks_to_swap"):
+        trainer.assert_extra_args(mock_args, train_dataset_group, None)
+
+
+def test_all_reduce_network_skips_deepspeed(trainer):
+    param = SimpleNamespace(grad="grad")
+    network = SimpleNamespace(parameters=lambda: [param])
+    accelerator = SimpleNamespace(distributed_type=SimpleNamespace(name="DEEPSPEED"), reduce=MagicMock(return_value="reduced"))
+
+    trainer.all_reduce_network(accelerator, network)
+
+    accelerator.reduce.assert_not_called()
+    assert param.grad == "grad"
+
+
+def test_all_reduce_network_delegates_without_deepspeed(trainer):
+    param = SimpleNamespace(grad="grad")
+    network = SimpleNamespace(parameters=lambda: [param])
+    accelerator = SimpleNamespace(distributed_type=SimpleNamespace(name="MULTI_GPU"), reduce=MagicMock(return_value="reduced"))
+
+    trainer.all_reduce_network(accelerator, network)
+
+    accelerator.reduce.assert_called_once_with("grad", reduction="mean")
+    assert param.grad == "reduced"
+
+
+def test_save_network_weights_uses_deepspeed_state_dict_for_zero3(trainer):
+    class FakeNetwork:
+        def __init__(self):
+            self.saved = None
+
+        def state_dict(self):
+            return {
+                "lora_unet_a.lora_down.weight": object(),
+                "lora_unet_a.alpha": object(),
+            }
+
+        def save_weights_from_state_dict(self, file, dtype, metadata, state_dict):
+            self.saved = (file, dtype, metadata, state_dict)
+
+    network = FakeNetwork()
+    args = argparse.Namespace(deepspeed=True, zero_stage=3)
+    accelerator = MagicMock()
+    accelerator.get_state_dict.return_value = {
+        "models.unet.weight": "ignored",
+        "models.network.lora_unet_a.lora_down.weight": "down",
+        "models.network.lora_unet_a.alpha": "alpha",
+    }
+
+    trainer.save_network_weights(args, accelerator, "ds_model", network, "out.safetensors", "bf16", {"m": "1"})
+
+    accelerator.get_state_dict.assert_called_once_with("ds_model")
+    assert network.saved == (
+        "out.safetensors",
+        "bf16",
+        {"m": "1"},
+        {
+            "lora_unet_a.lora_down.weight": "down",
+            "lora_unet_a.alpha": "alpha",
+        },
+    )

@@ -8,34 +8,41 @@ import pytest
 
 
 def install_anima_train_utils_import_stubs():
-    if "accelerate" not in sys.modules:
+    accelerate_module = sys.modules.get("accelerate")
+    if accelerate_module is None:
         accelerate_module = ModuleType("accelerate")
         accelerate_module.__spec__ = ModuleSpec("accelerate", loader=None)
-        accelerate_module.Accelerator = type("Accelerator", (), {})
-        accelerate_module.PartialState = type("PartialState", (), {})
         sys.modules["accelerate"] = accelerate_module
+    accelerate_module.Accelerator = getattr(accelerate_module, "Accelerator", type("Accelerator", (), {}))
+    accelerate_module.PartialState = getattr(accelerate_module, "PartialState", type("PartialState", (), {}))
 
-    device_utils_module = ModuleType("library.device_utils")
-    device_utils_module.__spec__ = ModuleSpec("library.device_utils", loader=None)
+    device_utils_module = sys.modules.get("library.device_utils")
+    if device_utils_module is None:
+        device_utils_module = ModuleType("library.device_utils")
+        device_utils_module.__spec__ = ModuleSpec("library.device_utils", loader=None)
+        sys.modules["library.device_utils"] = device_utils_module
     device_utils_module.init_ipex = lambda: None
     device_utils_module.clean_memory_on_device = lambda *args, **kwargs: None
     device_utils_module.synchronize_device = lambda *args, **kwargs: None
-    sys.modules.setdefault("library.device_utils", device_utils_module)
 
     utils_module = ModuleType("library.utils")
     utils_module.__spec__ = ModuleSpec("library.utils", loader=None)
     utils_module.setup_logging = lambda *args, **kwargs: None
     sys.modules.setdefault("library.utils", utils_module)
 
-    anima_models_module = ModuleType("library.anima_models")
-    anima_models_module.__spec__ = ModuleSpec("library.anima_models", loader=None)
-    anima_models_module.Anima = type("Anima", (), {})
-    sys.modules.setdefault("library.anima_models", anima_models_module)
+    anima_models_module = sys.modules.get("library.anima_models")
+    if anima_models_module is None:
+        anima_models_module = ModuleType("library.anima_models")
+        anima_models_module.__spec__ = ModuleSpec("library.anima_models", loader=None)
+        sys.modules["library.anima_models"] = anima_models_module
+    anima_models_module.Anima = getattr(anima_models_module, "Anima", type("Anima", (), {}))
 
-    qwen_module = ModuleType("library.qwen_image_autoencoder_kl")
-    qwen_module.__spec__ = ModuleSpec("library.qwen_image_autoencoder_kl", loader=None)
-    qwen_module.AutoencoderKLQwenImage = type("AutoencoderKLQwenImage", (), {})
-    sys.modules.setdefault("library.qwen_image_autoencoder_kl", qwen_module)
+    qwen_module = sys.modules.get("library.qwen_image_autoencoder_kl")
+    if qwen_module is None:
+        qwen_module = ModuleType("library.qwen_image_autoencoder_kl")
+        qwen_module.__spec__ = ModuleSpec("library.qwen_image_autoencoder_kl", loader=None)
+        sys.modules["library.qwen_image_autoencoder_kl"] = qwen_module
+    qwen_module.AutoencoderKLQwenImage = getattr(qwen_module, "AutoencoderKLQwenImage", type("AutoencoderKLQwenImage", (), {}))
 
     for module_name in ("library.anima_utils", "library.train_util"):
         module = ModuleType(module_name)
@@ -44,6 +51,10 @@ def install_anima_train_utils_import_stubs():
 
 
 install_anima_train_utils_import_stubs()
+sys.modules.pop("library.anima_train_utils", None)
+library_module = sys.modules.get("library")
+if library_module is not None and hasattr(library_module, "anima_train_utils"):
+    delattr(library_module, "anima_train_utils")
 
 from library import anima_train_utils
 

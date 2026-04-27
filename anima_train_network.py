@@ -68,6 +68,14 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
             args.blocks_to_swap is None or args.blocks_to_swap == 0
         ) or not args.cpu_offload_checkpointing, "blocks_to_swap is not supported with cpu_offload_checkpointing"
 
+        if getattr(args, "deepspeed", False):
+            assert (
+                args.blocks_to_swap is None or args.blocks_to_swap == 0
+            ), "--blocks_to_swap is not supported with DeepSpeed for Anima LoRA training"
+            assert (
+                not args.unsloth_offload_checkpointing
+            ), "--unsloth_offload_checkpointing is not supported with DeepSpeed for Anima LoRA training"
+
         if args.unsloth_offload_checkpointing:
             if not args.gradient_checkpointing:
                 logger.warning("unsloth_offload_checkpointing is enabled, so gradient_checkpointing is also enabled")
@@ -400,6 +408,59 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
         first_param = next(text_encoder.parameters())
         first_param.requires_grad_(True)
 
+    def _is_deepspeed_distributed(self, accelerator: Accelerator) -> bool:
+        distributed_type = getattr(accelerator, "distributed_type", None)
+        return getattr(distributed_type, "name", None) == "DEEPSPEED" or str(distributed_type).endswith("DEEPSPEED")
+
+    def all_reduce_network(self, accelerator, network):
+        if self._is_deepspeed_distributed(accelerator):
+            return
+        return super().all_reduce_network(accelerator, network)
+
+    def _extract_network_state_dict_from_deepspeed_state_dict(self, state_dict: dict, network: torch.nn.Module) -> dict:
+        network_keys = set(network.state_dict().keys())
+        extracted = {}
+        prefixes = ("models.network.", "module.models.network.", "network.", "module.network.")
+
+        for key, value in state_dict.items():
+            for prefix in prefixes:
+                if key.startswith(prefix):
+                    network_key = key[len(prefix) :]
+                    if network_key in network_keys:
+                        extracted[network_key] = value
+                    break
+
+        if not extracted:
+            for key, value in state_dict.items():
+                network_key = key[len("module.") :] if key.startswith("module.") else key
+                if network_key in network_keys:
+                    extracted[network_key] = value
+
+        missing = sorted(network_keys - set(extracted.keys()))
+        if missing:
+            preview = ", ".join(missing[:5])
+            if len(missing) > 5:
+                preview += ", ..."
+            raise ValueError(
+                "DeepSpeed ZeRO-3 state dict does not contain all Anima LoRA weights. "
+                f"Missing keys: {preview}"
+            )
+
+        return extracted
+
+    def save_network_weights(self, args, accelerator, training_model, network, ckpt_file, save_dtype, metadata):
+        if not (getattr(args, "deepspeed", False) and getattr(args, "zero_stage", 0) == 3):
+            return super().save_network_weights(args, accelerator, training_model, network, ckpt_file, save_dtype, metadata)
+
+        state_dict = accelerator.get_state_dict(training_model)
+        network_state_dict = self._extract_network_state_dict_from_deepspeed_state_dict(state_dict, network)
+        if not hasattr(network, "save_weights_from_state_dict"):
+            raise ValueError(
+                "Saving Anima LoRA with DeepSpeed ZeRO-3 requires a network module that supports "
+                "save_weights_from_state_dict(). Please use networks.lora_anima."
+            )
+        network.save_weights_from_state_dict(ckpt_file, save_dtype, metadata, network_state_dict)
+
     def prepare_unet_with_accelerator(
         self, args: argparse.Namespace, accelerator: Accelerator, unet: torch.nn.Module
     ) -> torch.nn.Module:
@@ -433,7 +494,7 @@ def setup_parser() -> argparse.ArgumentParser:
         "--unsloth_offload_checkpointing",
         action="store_true",
         help="offload activations to CPU RAM using async non-blocking transfers (faster than --cpu_offload_checkpointing). "
-        "Cannot be used with --cpu_offload_checkpointing or --blocks_to_swap.",
+        "Cannot be used with --cpu_offload_checkpointing, --blocks_to_swap or --deepspeed.",
     )
     return parser
 
