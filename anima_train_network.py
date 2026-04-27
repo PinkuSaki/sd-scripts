@@ -325,6 +325,12 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
                 source_attention_mask=attn_mask,
             )
         model_pred = model_pred.squeeze(2)  # 5D to 4D, [B, C, 1, H, W] -> [B, C, H, W]
+        if not torch.isfinite(model_pred).all():
+            raise RuntimeError(
+                "Anima LoRA forward produced NaN or Inf before loss calculation. "
+                "This usually points to an unstable precision/attention/DeepSpeed path; try disabling --deepspeed first, "
+                "then try --attn_mode torch, and lower the LoRA learning rate."
+            )
 
         # Rectified flow target: noise - latents
         target = noise - latents

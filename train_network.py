@@ -415,6 +415,9 @@ class NetworkTrainer:
                     latents = typing.cast(torch.FloatTensor, torch.nan_to_num(latents, 0, out=latents))
 
             latents = self.shift_scale_latents(args, latents)
+            if not torch.isfinite(latents).all():
+                accelerator.print("NaN or Inf found in latents, replacing with zeros")
+                latents = typing.cast(torch.FloatTensor, torch.nan_to_num(latents, nan=0.0, posinf=0.0, neginf=0.0))
 
         text_encoder_conds = []
         text_encoder_outputs_list = batch.get("text_encoder_outputs_list", None)

@@ -423,10 +423,28 @@ def do_sample(
             model_output = dit(x, t, crossattn_emb, padding_mask=padding_mask)
             model_output = model_output.float()
 
+        if not torch.isfinite(model_output).all():
+            logger.warning(
+                "NaN or Inf detected in Anima sampling model output at step %d/%d. "
+                "Replacing non-finite values with zeros for this sample; the image may be invalid. "
+                "Try disabling --deepspeed first, then try --attn_mode torch.",
+                i + 1,
+                steps,
+            )
+            model_output = torch.nan_to_num(model_output, nan=0.0, posinf=0.0, neginf=0.0)
+
         # Euler step: x_{t-1} = x_t - (sigma_t - sigma_{t-1}) * model_output
         dt = sigmas[i + 1] - sigma
         x = x + model_output * dt
         x = x.to(dtype)
+        if not torch.isfinite(x).all():
+            logger.warning(
+                "NaN or Inf detected in Anima sampling latents at step %d/%d. "
+                "Replacing non-finite values with zeros for this sample.",
+                i + 1,
+                steps,
+            )
+            x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
 
     return x
 
@@ -666,6 +684,9 @@ def _sample_image_inference(
     latents = do_sample(
         height, width, seed, dit, crossattn_emb, sample_steps, dit.dtype, accelerator.device, scale, flow_shift, neg_crossattn_emb
     )
+    if not torch.isfinite(latents).all():
+        logger.warning("NaN or Inf detected in final Anima sampling latents. Replacing non-finite values with zeros.")
+        latents = torch.nan_to_num(latents, nan=0.0, posinf=0.0, neginf=0.0)
 
     if not should_save:
         del latents
@@ -681,10 +702,14 @@ def _sample_image_inference(
     decoded = vae.decode_to_pixels(latents)
     vae.to(org_vae_device)
     clean_memory_on_device(accelerator.device)
+    if not torch.isfinite(decoded).all():
+        logger.warning("NaN or Inf detected after Anima VAE decode. Replacing non-finite pixels before saving sample.")
+        decoded = torch.nan_to_num(decoded, nan=-1.0, posinf=1.0, neginf=-1.0)
 
     # Convert to image
     image = decoded.float()
     image = torch.clamp((image + 1.0) / 2.0, min=0.0, max=1.0)[0]
+    image = torch.nan_to_num(image, nan=0.0, posinf=1.0, neginf=0.0)
     # Remove temporal dim if present
     if image.ndim == 4:
         image = image[:, 0, :, :]
