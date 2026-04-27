@@ -167,6 +167,13 @@ def prepare_deepspeed_plugin(args: argparse.Namespace):
 def prepare_deepspeed_model(args: argparse.Namespace, **models):
     # remove None from models
     models = {k: v for k, v in models.items() if v is not None}
+    mixed_precision = getattr(args, "mixed_precision", "no").lower()
+    if mixed_precision == "fp16":
+        autocast_dtype = torch.float16
+    elif mixed_precision == "bf16":
+        autocast_dtype = torch.bfloat16
+    else:
+        autocast_dtype = None
 
     class DeepSpeedWrapper(torch.nn.Module):
         def __init__(self, **kw_models) -> None:
@@ -174,7 +181,7 @@ def prepare_deepspeed_model(args: argparse.Namespace, **models):
 
             self.models = torch.nn.ModuleDict()
 
-            wrap_model_forward_with_torch_autocast = args.mixed_precision != "no"
+            wrap_model_forward_with_torch_autocast = autocast_dtype is not None
 
             for key, model in kw_models.items():
                 if isinstance(model, list):
@@ -212,7 +219,7 @@ def prepare_deepspeed_model(args: argparse.Namespace, **models):
                     )
                     device_type = get_preferred_device().type
 
-                with torch.autocast(device_type=device_type):
+                with torch.autocast(device_type=device_type, dtype=autocast_dtype):
                     return forward_fn(*args, **kwargs)
 
             model.forward = forward

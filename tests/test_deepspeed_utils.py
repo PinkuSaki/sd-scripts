@@ -3,6 +3,8 @@ import sys
 from importlib.machinery import ModuleSpec
 from types import ModuleType, SimpleNamespace
 
+import torch
+
 
 def install_deepspeed_utils_import_stubs():
     accelerate_module = sys.modules.get("accelerate")
@@ -62,3 +64,35 @@ def test_prepare_deepspeed_args_keeps_zero3_save_flag_when_already_enabled():
     deepspeed_utils.prepare_deepspeed_args(args)
 
     assert args.zero3_save_16bit_model is True
+
+
+def test_prepare_deepspeed_model_uses_requested_autocast_dtype(monkeypatch):
+    calls = []
+
+    class AutocastSpy:
+        def __init__(self, device_type, dtype=None):
+            calls.append((device_type, dtype))
+
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class DummyModel(torch.nn.Module):
+        @property
+        def device(self):
+            return SimpleNamespace(type="cuda")
+
+        def forward(self, x):
+            return x
+
+    monkeypatch.setattr(deepspeed_utils.torch, "autocast", AutocastSpy)
+
+    wrapper = deepspeed_utils.prepare_deepspeed_model(
+        argparse.Namespace(mixed_precision="bf16"),
+        model=DummyModel(),
+    )
+    wrapper.get_models()["model"](torch.tensor(1.0))
+
+    assert calls == [("cuda", torch.bfloat16)]
